@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -15,48 +16,40 @@ namespace KZ_CA_GrainGrowth
 {
     public partial class Form1 : Form
     {
-        [DebuggerDisplay("ID = {id}")]
-        public class MyCell
-        {
-            int id;
-            public MyCell(int id)
-            {
-                this.id = id;
-            }
-            public void set_id(int id)
-            {
-                this.id = id;
-            }
-            public int get_id()
-            {
-                return this.id;
-            }
-
-            public MyCell myclone()
-            {
-                
-                return new MyCell(id);
-            }
-        }  
-
+        
         Bitmap image1;
+        Bitmap image2;
         int meshSizeX;
         int meshSizeY;
-        bool flag = false;
+        bool flagGrainGrowth = false;
+        bool flagMonteCarlo = false;
+        bool flagEnergyMap = false;
+        bool flagCannon = false;
+        bool flagRecrystallization = false;
+
         MyCell[,] currentUniverse;
+        MyCell[,] oldUniverse;
         Color[] colorArray;
+        List<Color> colorDensityList;
         int currentTime;
         //Stworzyć klasę  komórki
         int switchNeighborhood;
         int switchBoundaryCondition;
         int switchGrainGrowthType;
+        MonteCarlo monteCarlo;
+        Recrystallization recrystallization;
 
         int amountX;
         int amountY;
         int amountSeed;
+        double rayLenght;
+        MyProperties myProperties;
 
         private volatile bool stopThread = false;
         private Thread workThread;
+        private Thread monteCarloThread;
+        private Thread recrystallizationThread;
+
 
         void initComboBox()
         {
@@ -66,6 +59,7 @@ namespace KZ_CA_GrainGrowth
             comboBoxNeighborhood.Items.Add("Heks Prawe");
             comboBoxNeighborhood.Items.Add("Heks Losowe");
             comboBoxNeighborhood.Items.Add("Pent Losowe");
+            comboBoxNeighborhood.Items.Add("Z promieniem");
             comboBoxNeighborhood.SelectedIndex = 0;
 
             comboBoxBoundaryCondition.Items.Add("Periodyczne");
@@ -76,12 +70,12 @@ namespace KZ_CA_GrainGrowth
             comboBoxGrainGrowthType.Items.Add("Losowe");
             comboBoxGrainGrowthType.Items.Add("Z promieniem");
             comboBoxGrainGrowthType.Items.Add("Wybór Użytkownika");
-            comboBoxGrainGrowthType.SelectedIndex = 0;
+            comboBoxGrainGrowthType.SelectedIndex = 1;
         }
 
         void initForm()
         {
-            pictureBox1.Size = new Size(1000, 500);
+            //pictureBox1.Size = new Size(1000, 500);
             numericUpDownX.Minimum = 20;
             numericUpDownX.Maximum = 500;
             numericUpDownY.Minimum = 20;
@@ -92,10 +86,12 @@ namespace KZ_CA_GrainGrowth
             numericUpDownAmountY.Minimum = 1;
             numericUpDownAmountY.Maximum = 10000;
 
+
             numericUpDownX.Value = 300;
             numericUpDownY.Value = 300;
-            numericUpDownAmountX.Value = 10;
+            numericUpDownAmountX.Value = 300;
             numericUpDownAmountY.Value = 10;
+
             initComboBox();
         }
 
@@ -155,6 +151,8 @@ namespace KZ_CA_GrainGrowth
             switchNeighborhood = comboBoxNeighborhood.SelectedIndex;
             switchBoundaryCondition = comboBoxBoundaryCondition.SelectedIndex;
             switchGrainGrowthType = comboBoxGrainGrowthType.SelectedIndex;
+            rayLenght = Double.Parse(textBoxRay.Text);
+
 
             amountX = (int)numericUpDownAmountX.Value;
             amountY = (int)numericUpDownAmountY.Value;
@@ -165,9 +163,13 @@ namespace KZ_CA_GrainGrowth
             currentUniverse = new MyCell[meshSizeX + 2, meshSizeY + 2]; ;
             currentTime = 0;
 
+            double tmpkt = Double.Parse(textBoxkT.Text);
+            int tmpMCiteration = int.Parse(textBoxMCIteration.Text);
+            myProperties = new MyProperties(meshSizeX, meshSizeY, amountX, amountY, amountSeed, rayLenght,tmpMCiteration, tmpkt, switchNeighborhood, switchBoundaryCondition, switchGrainGrowthType);
+
             seed();
             setBoundaryCondition();
-            drawUniverse();
+            //drawUniverse();
         }
 
         private bool checkRayNeighborhood(int x, int y)//sprawdzać gdy mniejsze od 0
@@ -260,7 +262,7 @@ namespace KZ_CA_GrainGrowth
                             continue;
                         }
                         amountSeed = count - 1;//sprawdzić
-                        if (missCount >= 1000) break;
+                        if (missCount >= 100) break;
 
                     }
                     
@@ -271,8 +273,24 @@ namespace KZ_CA_GrainGrowth
                 default:
                     break;
             }
+            myProperties.amountSeed = amountSeed;
             colorArray = new Color[amountSeed];
             createColorArray();
+        }
+
+        private double calcuteDistance(int x1, int y1, int x2, int y2, MyCell cell1, MyCell cell2)
+        {
+            double distance;
+            //Przekonwertować x1, y1 na współrzędne kartezjańskie i wtedy liczyć
+            double tmpX1 = x1 + cell1.get_gravityX();
+            double tmpX2 = x2 + cell2.get_gravityX();
+
+            double tmpY1 = y1 + cell1.get_gravityY();
+            double tmpY2 = y2 + cell2.get_gravityY();
+
+            distance = Math.Pow(x2 - x1, 2) + Math.Pow(y2 - y1, 2);
+            distance = Math.Sqrt(distance);
+            return distance;
         }
 
         private int getNeighborhood(MyCell[,] last, int x, int y)
@@ -282,6 +300,11 @@ namespace KZ_CA_GrainGrowth
             List<int> idList = new List<int>();
             int id;
             int tmp = 0;
+            int tmpIterations;
+            double distance;
+            int tmpI;
+            int tmpJ;
+            bool boundaryCrossed = false;
             switch (switchNeighborhood)
             {
                 case 0://Von Neumanna
@@ -517,6 +540,63 @@ namespace KZ_CA_GrainGrowth
                         }
                     }
                     break;
+                case 6://Nie działą
+                    tmp = (int)Math.Floor(rayLenght);
+                    for (int i = x - tmp; i <= x + tmp; i++)//<=
+                    {
+                        for (int j = y - tmp; j <= y + tmp; j++)//<=
+                        {
+                            boundaryCrossed = false;
+                            tmpI = i;
+                            tmpJ = j;
+
+                            if (tmpI == x && tmpJ == y) continue;
+                            if (tmpI < 0)
+                            {
+                                tmpI = meshSizeX + tmpI;
+                                boundaryCrossed = true;
+                            }
+                            if (tmpJ < 0)
+                            {
+                                tmpJ = meshSizeY + tmpJ;
+                                boundaryCrossed = true;
+                            }
+                            if (last[tmpI, tmpJ] != null)
+                            {
+                                //sprawdzać gdy wychodzi poza tablice
+                                id = last[tmpI, tmpJ].get_id();
+                                //nie będzieć działać dlatego że komórka nie jest jeszcze utworzona
+                                //trzeba by zmienić że np tutaj losuje środki cieżkości a w funkcji grow
+                                //po utworzeniu komórki je przypisuje
+                                distance = calcuteDistance(x, y, tmpI, tmpJ, last[x, y], last[tmpI, tmpJ]);
+                                if(boundaryCrossed == true)
+                                {
+                                    if (distance > rayLenght/2)
+                                    {
+                                        continue;
+                                    }
+                                }
+                                if(distance > rayLenght)
+                                {
+                                    continue;
+                                }
+                                if (id != 0)
+                                {
+                                    if (idList.Contains(id) == true)
+                                    {
+                                        countList[idList.IndexOf(id)]++;
+                                    }
+                                    else
+                                    {
+                                        idList.Add(id);
+                                        countList.Add(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    break;
                 default:
                     break;
             }
@@ -567,7 +647,7 @@ namespace KZ_CA_GrainGrowth
                     break;
                 }
             }
-            flag = false;
+            flagGrainGrowth = false;
             buttonStart.BeginInvoke((MethodInvoker)delegate
             {
                 buttonStart.Text = "Start";
@@ -576,13 +656,109 @@ namespace KZ_CA_GrainGrowth
             return;
         }
 
-        private void StartThread()
+        private void startMonteCarlo()
+        {
+            for (int i = 0; i < myProperties.MCIteration; i++)
+            {
+                currentUniverse = monteCarlo.computeMonteCarlo(currentUniverse);
+                setBoundaryCondition();//Warunki brzegowe w czasie montecarlo zrobić
+                drawUniverse();
+                if (stopThread)
+                {
+                    // clean up your work
+                    break;
+                }
+            }
+            buttonMonteCarloStart.BeginInvoke((MethodInvoker)delegate
+            {
+                buttonMonteCarloStart.Text = "Koniec";
+            });
+            return;
+        }
+
+        private void startFiringDisclocationCannon()
+        {
+            for (double i = 0; i < myProperties.time; i = i + myProperties.deltaTime)
+            {
+                currentUniverse = recrystallization.fireDisclocationCannont(currentUniverse, i);
+
+                labelTime.BeginInvoke((MethodInvoker)delegate
+                {
+                    labelTime.Text = i.ToString("0.#####");
+                });
+                if (stopThread)
+                {
+                    // clean up your work
+                    break;
+                }
+            }
+            buttonCannon.BeginInvoke((MethodInvoker)delegate
+            {
+                buttonCannon.Text = "Koniec";
+                buttonNucleation.Enabled = true;
+            });
+            drawDisclocationDensity();
+            return;
+        }
+
+        private void startRecrystalization()
+        {
+            //jak długo trwa rekrystalizacja?
+            int i = 1;
+
+            while (recrystallization.isFinished == false)//zrobić żeby zatrzymało się gdy nie ma zmiany// użycie tablicy recrystallizedLastTime
+            {
+                currentUniverse = recrystallization.recrystallize(currentUniverse);
+                setBoundaryCondition();
+                labelTime.BeginInvoke((MethodInvoker)delegate
+                {
+                    labelTime.Text = i.ToString();
+                });
+                drawUniverse();
+                drawDisclocationDensity();
+                //Thread.Sleep(1500);
+                if (stopThread)
+                {
+                    // clean up your work
+                    break;
+                }
+                i++;
+            }
+            buttonStartRecrystal.BeginInvoke((MethodInvoker)delegate
+            {
+                buttonStartRecrystal.Text = "Koniec";
+            });
+            return;
+        }
+
+        private void StartThreadGrainGrowth()
         {
             if (workThread == null)
             {
                 stopThread = false;
                 workThread = new Thread(new ThreadStart(startGrowth));
                 workThread.Start();
+            }
+        }
+
+        private void StartThreadMonteCarlo()
+        {
+            if (monteCarloThread == null)
+            {
+                stopThread = false;
+                monteCarloThread = new Thread(new ThreadStart(startMonteCarlo));
+                monteCarloThread.Start();
+            }
+        }
+
+        private void StartThreadRecrystallization(int k)
+        {
+            if (recrystallizationThread == null)
+            {
+                stopThread = false;
+                if(k == 0) recrystallizationThread = new Thread(new ThreadStart(startFiringDisclocationCannon));
+                else if (k == 1) recrystallizationThread = new Thread(new ThreadStart(startRecrystalization));
+                recrystallizationThread.Start();
             }
         }
 
@@ -595,12 +771,33 @@ namespace KZ_CA_GrainGrowth
                 workThread = null;
             }
         }
+
+        private void StopThreadMonteCarlo()
+        {
+            if (monteCarloThread != null)
+            {
+                stopThread = true;
+                monteCarloThread.Join(); // This makes the code here pause until the Thread exits.
+                monteCarloThread = null;
+            }
+        }
+
+        private void StopThreadRecrystallization()
+        {
+            if (recrystallizationThread != null)
+            {
+                stopThread = true;
+                recrystallizationThread.Join(); // This makes the code here pause until the Thread exits.
+                recrystallizationThread = null;
+            }
+        }
+
         private void createColorArray()
         {
-            Random random = new Random();    
+            Random random = new Random();
             for (int i = 0; i < amountSeed; i++)
             {
-                colorArray[i] = Color.FromArgb(random.Next(256), random.Next(256), random.Next(256));
+                colorArray[i] = Color.FromArgb(random.Next(100), random.Next(256), random.Next(256));
             }
         }
 
@@ -608,6 +805,7 @@ namespace KZ_CA_GrainGrowth
         {
             int tmp;
             image1 = new Bitmap(meshSizeX, meshSizeY);
+
 
             for (int i = 1; i < meshSizeX + 1; i++)//zrobić żeby każdy kolor
             {
@@ -624,17 +822,136 @@ namespace KZ_CA_GrainGrowth
 
                 }
             }
-            pictureBox1.Image = image1;
+            pictureBox1.BeginInvoke((MethodInvoker)delegate
+            {
+                pictureBox1.Image = image1;
+            });
+
+        }
+
+        private void drawEnergy()
+        {
+            image1 = new Bitmap(meshSizeX, meshSizeY);
+            //List<Color> colorListGradient = GetGradients(Color.Red, Color.Violet, 8).ToList();
+            List<Color> colorListGradient = new List<Color>();
+            colorListGradient.Add(Color.Red);
+            colorListGradient.Add(Color.Violet);
+            colorListGradient.Add(Color.Pink);
+            colorListGradient.Add(Color.Blue);
+            colorListGradient.Add(Color.DeepPink);
+            colorListGradient.Add(Color.DeepSkyBlue);
+            colorListGradient.Add(Color.DimGray);
+            colorListGradient.Add(Color.BlanchedAlmond);
+            for (int i = 1; i < meshSizeX + 1; i++)//zrobić żeby każdy kolor
+            {
+                for (int j = 1; j < meshSizeY + 1; j++)
+                {
+                    if (currentUniverse[i, j].get_energy() == 0) image1.SetPixel(i - 1, j - 1, Color.LawnGreen);
+                    else if (currentUniverse[i, j].get_energy() > 0)
+                    {
+                        image1.SetPixel(i - 1, j - 1, colorListGradient[currentUniverse[i, j].get_energy()-1]);
+                    }
+
+
+                }
+            }
+            pictureBox1.BeginInvoke((MethodInvoker)delegate
+            {
+                pictureBox1.Image = MyResizeImage(image1);
+                //pictureBox1.Image = image1;
+            });
+
+        }
+
+        private void drawMicrostructure()
+        {
+            image1 = new Bitmap(meshSizeX, meshSizeY);
+            double min = Double.MaxValue;
+            double density;
+            int tmp = 0;
+
+            for (int i = 1; i < myProperties.meshSizeX + 1; i++)
+            {
+                for (int j = 1; j < myProperties.meshSizeY + 1; j++)
+                {
+                    density = currentUniverse[i, j].get_disclocationDensity();
+                    tmp = currentUniverse[i, j].get_id() - 1;
+                    image1.SetPixel(i - 1, j - 1, colorArray[tmp]);
+                    if (currentUniverse[i, j].get_isRecrystallized() == false)
+                    {
+                        image1.SetPixel(i - 1, j - 1,Color.Red);
+                    }
+                    double step = min;
+
+                }
+            }
+            pictureBox1.BeginInvoke((MethodInvoker)delegate
+            {
+                //pictureBox1.Image = image1;
+                pictureBox1.Image = MyResizeImage(image1);
+            });
+        }
+        
+        private void drawDisclocationDensity()
+        {
+            int colorAmount = 5;
+            image2 = new Bitmap(meshSizeX, meshSizeY);
+            double min = Double.MaxValue;
+            double max = 0.0;
+            double delta;
+            double density;
+            colorDensityList = GetGradients(Color.FromArgb(152,102,0), Color.DarkGreen, colorAmount).ToList();
+            
+            for (int i = 1; i < myProperties.meshSizeX + 1; i++)
+            {
+                for (int j = 1; j < myProperties.meshSizeY + 1; j++)
+                {
+                    density = currentUniverse[i, j].get_disclocationDensity();
+                    if (density == 0) continue;
+                    if (density < min) min = density;
+                    if (density > max) max = density;
+                }
+            }
+            delta = (max - min) / colorAmount;
+            for (int i = 1; i < myProperties.meshSizeX + 1; i++)
+            {
+                for (int j = 1; j < myProperties.meshSizeY + 1; j++)
+                {
+                    density = currentUniverse[i, j].get_disclocationDensity();
+                    if(density == 0)
+                    {
+                        image2.SetPixel(i - 1, j - 1, Color.DarkBlue);
+                        continue;
+                    }
+                    double step = min;
+                    for (int k = 0; k < colorAmount; k++)
+                    {
+                        
+                        if (density < (step + step) && density >= step )
+                        {
+                            image2.SetPixel(i - 1, j - 1, colorDensityList[k]);
+                        }
+                        step += step;
+                    }
+                }
+            }
+            pictureBox2.BeginInvoke((MethodInvoker)delegate
+            {
+                //pictureBox1.Image = image1;
+                pictureBox2.Image = MyResizeImage(image2);
+            });
+
+
         }
 
         private void buttonStart_Click(object sender, EventArgs e)
         {
-            flag = !flag;
-            if (flag == true)
+            flagGrainGrowth = !flagGrainGrowth;
+            if (flagGrainGrowth == true)
             {
                 //initGrowth();
                 buttonStart.Text = "Stop";
-                StartThread();
+                StartThreadGrainGrowth();
             }
             else
             {
@@ -645,6 +962,7 @@ namespace KZ_CA_GrainGrowth
 
         private void pictureBox1_Click(object sender, EventArgs e)
         {
+            
             if(comboBoxGrainGrowthType.SelectedIndex == 3)
             {
                 MouseEventArgs me = (MouseEventArgs)e;
@@ -679,6 +997,7 @@ namespace KZ_CA_GrainGrowth
                     numericUpDownAmountY.Enabled = true;
                     break;
                 case 3://Wybór Uzytkownika
+                    pictureBox1.Enabled = true;
                     numericUpDownAmountX.Enabled = false;
                     numericUpDownAmountY.Enabled = false;
                     break;
@@ -691,10 +1010,163 @@ namespace KZ_CA_GrainGrowth
         {
             buttonStart.Enabled = true;
             StopThread();
-            flag = false;
+            flagGrainGrowth = false;
             initGrowth();
+            drawUniverse();
         }
 
-     
+        private void Form1_Load(object sender, EventArgs e)
+        {
+
+        }
+
+        private void buttonEnergy_Click(object sender, EventArgs e)
+        {
+            monteCarlo = new MonteCarlo(myProperties);
+            currentUniverse = monteCarlo.computeEnergyEverything(currentUniverse);
+            drawEnergy();
+        }
+
+        private void buttonMonteCarloStart_Click(object sender, EventArgs e)
+        {
+            oldUniverse = currentUniverse;
+            flagMonteCarlo = !flagMonteCarlo;
+            if (flagMonteCarlo == true)
+            {
+                StopThreadMonteCarlo();
+                double tmpkt = Double.Parse(textBoxkT.Text);
+                int tmpMCiteration = int.Parse(textBoxMCIteration.Text);
+                myProperties.UpdateMyProperties(meshSizeX, meshSizeY, amountX, amountY, amountSeed, rayLenght, tmpMCiteration, tmpkt, switchNeighborhood, switchBoundaryCondition, switchGrainGrowthType);
+
+                monteCarlo = new MonteCarlo(myProperties);
+                buttonMonteCarloStart.Text = "Stop";
+                StartThreadMonteCarlo();
+            }
+            else
+            {
+                StopThreadMonteCarlo();
+                buttonMonteCarloStart.Text = "Start";
+            }
+        }
+        public static IEnumerable<Color> GetGradients(Color start, Color end, int steps)
+        {
+            int stepA = ((end.A - start.A) / (steps - 1));
+            int stepR = ((end.R - start.R) / (steps - 1));
+            int stepG = ((end.G - start.G) / (steps - 1));
+            int stepB = ((end.B - start.B) / (steps - 1));
+
+            for (int i = 0; i < steps; i++)
+            {
+                yield return Color.FromArgb(start.A + (stepA * i),
+                                            start.R + (stepR * i),
+                                            start.G + (stepG * i),
+                                            start.B + (stepB * i));
+            }
+        }
+        private Bitmap MyResizeImage(Bitmap sImage)
+        {
+            int scale = 3;
+
+            Bitmap picOriginal = sImage;
+            int wid = (int)(picOriginal.Width * scale);
+            int hgt = (int)(picOriginal.Height * scale);
+            Bitmap bm = new Bitmap(wid, hgt);
+
+            using (Graphics gr = Graphics.FromImage(bm))
+            {
+                // No smoothing.
+                gr.InterpolationMode = InterpolationMode.NearestNeighbor;
+
+                Point[] dest =
+                {
+            new Point(0, 0),
+            new Point(wid, 0),
+            new Point(0, hgt),
+        };
+                Rectangle source = new Rectangle(
+                    0, 0,
+                    picOriginal.Width,
+                    picOriginal.Height);
+                gr.DrawImage(picOriginal,
+                    dest, source, GraphicsUnit.Pixel);
+            }
+            return bm;
+        }
+
+        private void buttonCannon_Click(object sender, EventArgs e)
+        {
+            flagCannon = !flagCannon;
+            if (flagCannon == true)
+            {
+                double A = double.Parse(textBoxA.Text);
+                double B = double.Parse(textBoxB.Text);
+                double critical = double.Parse(textBoxCritical.Text);
+                double time = double.Parse(textBoxRecTime.Text);
+                double deltaTime = double.Parse(textBoxRecDeltaTime.Text);
+                double bigPackageSize = double.Parse(textBoxBigPackage.Text);
+                double smallPackageSize = double.Parse(textBoxSmallPackage.Text);
+                myProperties.UpdateRecrystallization(A, B, critical, time, deltaTime, bigPackageSize, smallPackageSize);
+                recrystallization = new Recrystallization(myProperties);
+                buttonCannon.Text = "Leci!";
+                StartThreadRecrystallization(0);
+
+            }
+            else
+            {
+                StopThreadRecrystallization();
+                buttonCannon.Text = "Ognia";
+            }
+        }
+
+        private void buttonDisDensityDraw_Click(object sender, EventArgs e)
+        {
+            drawMicrostructure();
+        }
+
+        private void buttonMicro_Click(object sender, EventArgs e)
+        {
+            //tableLayoutPanel1.Width = 100;
+            drawUniverse();
+            
+        }
+
+        private void buttonStartRecrystal_Click(object sender, EventArgs e)
+        {
+            flagRecrystallization = !flagRecrystallization;
+            if (flagRecrystallization == true)
+            {
+                StopThreadRecrystallization();
+                buttonStartRecrystal.Text = "Rekrystalizacja";
+                StartThreadRecrystallization(1);
+
+            }
+            else
+            {
+                StopThreadRecrystallization();
+                buttonStartRecrystal.Text = "Start";
+            }
+        }
+
+        private void buttonNucleation_Click(object sender, EventArgs e)
+        {
+            oldUniverse = currentUniverse;
+            currentUniverse = recrystallization.nucleation(currentUniverse);
+            drawDisclocationDensity();
+            buttonNucleation.BeginInvoke((MethodInvoker)delegate
+            {
+                buttonNucleation.Text = "Koniec";
+                
+            });
+            buttonStartRecrystal.BeginInvoke((MethodInvoker)delegate
+            {
+                buttonStartRecrystal.Enabled = true;
+
+            });
+
+        }
+
+        private void buttonOldUni_Click(object sender, EventArgs e)
+        {
+        }
     }
 }
